@@ -1,0 +1,70 @@
+From 39049ae8ac1ddf976bc43e74893bb3731b86260a Mon Sep 17 00:00:00 2001
+From: heytdep <tommaso@xycloo.com>
+Date: Tue, 27 Oct 2026 01:00:55 +0000
+Subject: [PATCH] untangle new ubuntu macro and add shared bit for flagging
+ access to mmio devices
+
+---
+ pal/src/host/tdx/pal_main.c           | 5 +++++
+ pal/src/host/tdx/tdx_arch.c           | 2 +-
+ pal/src/host/tdx/tdx_arch.h           | 2 ++
+ pal/src/host/vm-common/kernel_debug.c | 1 -
+ 4 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/pal/src/host/tdx/pal_main.c b/pal/src/host/tdx/pal_main.c
+index 24e28632..531c82ff 100644
+--- a/pal/src/host/tdx/pal_main.c
++++ b/pal/src/host/tdx/pal_main.c
+@@ -45,6 +45,11 @@ static struct pal_handle* g_first_thread_handle = NULL;
+ 
+ static uint64_t g_shared_bit;
+ 
++__attribute_no_sanitize_address
++uint64_t tdx_get_shared_bit(void) {
++    return g_shared_bit;
++}
++
+ static int memory_mark_pages_shared(uint64_t addr, size_t size) {
+     uint64_t mark_addr = addr;
+     while (mark_addr < addr + size) {
+diff --git a/pal/src/host/tdx/tdx_arch.c b/pal/src/host/tdx/tdx_arch.c
+index 8665150e..45bcf7d5 100644
+--- a/pal/src/host/tdx/tdx_arch.c
++++ b/pal/src/host/tdx/tdx_arch.c
+@@ -120,7 +120,7 @@ long tdx_vmcall_ve_reqmmio(uint64_t access_size, uint64_t direction, void* mmio_
+                                    .r11 = TDG_VP_VMCALL_VE_REQMMIO,
+                                    .r12 = access_size,
+                                    .r13 = direction,
+-                                   .r14 = (uint64_t)mmio_addr,
++                                   .r14 = (uint64_t)mmio_addr | tdx_get_shared_bit(),
+                                    .r15 = (direction == TDG_VP_VMCALL_INSTR_IO_WRITE) ? *data : 0 };
+     tdx_tdcall(&regs);
+ 
+diff --git a/pal/src/host/tdx/tdx_arch.h b/pal/src/host/tdx/tdx_arch.h
+index 0da4ce4b..aac4350e 100644
+--- a/pal/src/host/tdx/tdx_arch.h
++++ b/pal/src/host/tdx/tdx_arch.h
+@@ -130,6 +130,8 @@ long tdx_vmcall_instr_io(uint64_t access_size, uint64_t direction, uint64_t iopo
+ long tdx_vmcall_instr_rdmsr(uint64_t msr_index, uint64_t* out_msr_value);
+ long tdx_vmcall_instr_wrmsr(uint64_t msr_index, uint64_t msr_value);
+ 
++uint64_t tdx_get_shared_bit(void);
++
+ long tdx_vmcall_ve_reqmmio(uint64_t access_size, uint64_t direction, void* mmio_addr,
+                            uint64_t* data);
+ 
+diff --git a/pal/src/host/vm-common/kernel_debug.c b/pal/src/host/vm-common/kernel_debug.c
+index 960d9407..a06f7448 100644
+--- a/pal/src/host/vm-common/kernel_debug.c
++++ b/pal/src/host/vm-common/kernel_debug.c
+@@ -15,7 +15,6 @@
+ 
+ #include <stdint.h>
+ #include <stddef.h>
+-#include <string.h>
+ 
+ #include "kernel_debug.h"
+ #include "vm_callbacks.h"
+-- 
+2.53.0
+

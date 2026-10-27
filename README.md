@@ -6,25 +6,33 @@ CPU → BIOS → hypervisor → kernel → userspace → enclave launch → DCAP
 
 ```bash
 git clone https://github.com/tpluslabs/gramine-cheker && cd gramine-cheker
-sudo ./run.sh            # everything: install.sh, then check.sh
+sudo ./run.sh            # everything: install.sh + check.sh; on a TDX host also install-tdx.sh + check-tdx.sh
 
 ./check.sh --no-run      # fast, read-only: hardware/BIOS/kernel/userspace
 sudo ./install.sh        # build tools + Gramine + aesmd + DCAP QPL (Ubuntu 22.04/24.04/26.04, Debian 12)
 sudo ./check.sh          # full: builds the probe, then builds, signs and runs a real enclave and asks for a quote
+./check-tdx.sh --no-run  # Gramine-TDX host: BIOS TDX, kvm_intel.tdx, TDX module, /dev/kvm, vhost-vsock, QEMU, QGS
+sudo ./install-tdx.sh    # builds gramine-tdx + td-shim into /opt/gramine-tdx, installs QEMU, virtiofsd, tdx-qgs
+sudo ./check-tdx.sh      # full: runs app/ inside a TD and asks for a TD quote
 ```
 
 Run as root to get the BIOS checks (they read MSR `0x3a`). Each run saves a report to
-`results/<host>-<utc>.txt`. The exit code is the number of FAILs; `0` means ready.
+`results/<host>-{sgx,tdx}-<utc>.txt`. The exit code is the number of FAILs; `0` means ready.
 Kubernetes: `kubectl apply -f k8s/pod.yaml` (see the comments in the file).
 
 | Path | What |
 |---|---|
-| `check.sh` | the test runner |
+| `check.sh` | Gramine-SGX test runner |
+| `check-tdx.sh` | Gramine-TDX (host side) test runner |
+| `lib.sh` | report + PASS/FAIL helpers shared by both runners |
+| `install-tdx.sh` | builds Gramine-TDX: upstream `gramine-tdx@intel_tdx` `8dc53f9a` + `tdx/*.patch`, td-shim `33fa83e` (PR #846, QEMU 9+ TempMem layout), Rust 1.88.0; guards glibc 2.39's `OPEN_TREE_CLONE` against Linux ≥ 6.x headers |
+| `tdx/gramine-tdx-getquote-shared-bit.patch` | sets the TDX shared bit on the `GetQuote` TDVMCALL buffer GPA: KVM rejects a private GPA, so `/dev/attestation/quote` failed with EACCES before reaching QGS |
+| `tdx/gramine-tdx-mmio-shared-bit.patch` | sets the TDX shared bit on MMIO `#VE` requests (without it virtio init fails under QEMU 10) and drops a conflicting `<string.h>` include |
 | `probe/sgx-cpuid.c` | reads raw CPUID leaf 7/0x12 and `IA32_FEATURE_CONTROL`, so it can tell "CPU lacks SGX" apart from "BIOS disabled it". Built on the fly if `cc` exists, else downloaded prebuilt from the `latest` release |
 | `.github/workflows/build.yml` | CI: lints the scripts and builds the probe as a static binary on every push/PR. Pushes to `main` update the rolling [`latest`](https://github.com/tpluslabs/gramine-cheker/releases/tag/latest) prerelease; `v*` tags get a versioned release. The binary ships with a `.sha256` |
 | `app/` | minimal enclave: prints `hello from enclave`, then gets a DCAP quote via `/dev/attestation/quote` |
 | `install.sh` | installs build tools and the runtime dependencies |
-| `run.sh` | `install.sh` then `check.sh`, as root |
+| `run.sh` | `install.sh` + `check.sh`, then the TDX pair when `kvm_intel.tdx=Y`, as root |
 | `k8s/pod.yaml` | runs the check inside a pod |
 
 ---
@@ -49,7 +57,7 @@ Gramine ≥ 1.9 supports **only** the upstream in-kernel driver, so **FLC is man
 | 12 | Userspace | `gramine` package (`gramine-sgx`, `gramine-manifest`, `gramine-sgx-sign`, `is-sgx-available`), signing key from `gramine-sgx-gen-private-key` (RSA-3072) | `gramine`, `build` |
 | 13 | Attestation | `sgx-aesm-service` + `libsgx-aesm-{quote-ex,ecdsa}-plugin` (aesmd running, `/var/run/aesmd/aesm.socket`) | `aesmd` |
 | 14 | Attestation | `libsgx-dcap-default-qpl` + `/etc/sgx_default_qcnl.conf` pointing at a reachable PCCS (or at your provider's cache). EPID/IAS is dead (EOL April 2025), so it's DCAP only | `dcap.*` |
-| 15 | Attestation | Platform registered with Intel PCS. Single-socket boxes are fine by default; **multi-socket boxes need multi-package registration** (`sgx-ra-service` / MPA) before a PCK cert exists | `attest.dcap-quote` |
+| 15 | Attestation | Platform registered with Intel PCS: PCS has a PCK cert for it. Multi-socket boxes need multi-package registration (`sgx-ra-service` / MPA). Single-socket Xeon 6 boxes need it too: the DX154 (6741P) has a platform manifest (`SgxRegistrationServerRequest` UEFI var) and PCS returns 404 for its PCK cert until it is registered. Don't run `PCKIDRetrievalTool` casually: it sets the `SgxRegistrationStatus` UEFI var to completed, after which MPA skips registration | `attest.dcap-quote`, `attest.hint`, `uefi` |
 | 16 | Keep current | TCB: microcode/BIOS recovery. An out-of-date TCB still produces quotes, but verifiers will report `OUT_OF_DATE`/`SW_HARDENING_NEEDED` | manual |
 
 The only full proof is the end-to-end test: `run.gramine-sgx` (enclave launched in production mode, `sgx.debug=false`)
@@ -128,11 +136,11 @@ The E-2xxx boxes have a small EPC (128/512 MB), which is fine for small enclaves
 
 ## Hetzner bare metal
 
-Source: Intel ARK and Hetzner product pages, checked 2026-10-06. Nothing tested yet.
+Source: Intel ARK and Hetzner product pages, checked 2026-10-06. DX154 tested 2026-10-27: see `results/hetzner-DX154-Xeon-6741P-26.04.md`.
 
 | Plan | CPU | Max EPC per CPU | Notes |
 |---|---|---|---|
-| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | Hetzner names SGX + EPC for this box ([press release](https://www.hetzner.com/pressroom/neue-enterprise-hardware-von-dell-2026/)) |
+| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | **tested, Gramine-SGX READY** after manual platform registration: SGX2, 2 GB EPC as delivered (`PrmrrSize=2G`, iDRAC), DCAP quote OK. TDX on in BIOS; Gramine-TDX runs apps, TD quote still fails (see results) |
 | EX131 | Xeon 6731P (Granite Rapids) | 128 GB | CPU capable; Hetzner says nothing about SGX in BIOS |
 | DX294 | 2× Xeon 6787P (Granite Rapids) | 512 GB | dual socket, so needs multi-package registration (requirement 15) |
 
@@ -154,7 +162,13 @@ Scale-i1 (Xeon 6517P) does. So run `check.sh` on one box first.
 | `kernel.*` | kernel < 5.11, or `dmesg \| grep sgx` shows why the driver didn't load |
 | `dev.*` | udev/group permissions, or the container didn't get the devices |
 | `run.gramine-sgx` | see the enclave log printed above it; often EPC too small or `noexec` |
+| `run.gramine-sgx` with `AESM error 38`, `dev.sgx_provision.aesmd` | aesmd can't open `/dev/sgx_provision` (QE3 0x4004): `udevadm trigger --subsystem-match=misc`, restart aesmd |
+| `run.gramine-sgx` with `AESM error 44`, `attest.hint` | PCS has no PCK cert (`0xe011`): register the platform (req. 15) |
 | `attest.dcap-quote` | aesmd not running, QPL/PCCS misconfigured, platform not registered |
+| `bios.tdx` | BIOS: TME, TME-MT, TDX, SEAM loader, TDX key split > 0 |
+| `kvm.tdx`, `tdx.module` | kernel without TDX host support, or `kvm_intel.tdx=1` missing from the cmdline |
+| `run.gramine-tdx` | see the TD console printed above it |
+| `attest.tdx-quote` | `tdx-qgs` not running (QEMU talks to it on vsock 4050), or the same PCCS/registration causes as SGX |
 
 ## Google Cloud (GCE / GKE)
 

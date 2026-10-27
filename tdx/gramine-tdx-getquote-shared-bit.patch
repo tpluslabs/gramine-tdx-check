@@ -1,0 +1,13 @@
+diff --git a/pal/src/host/tdx/pal_misc.c b/pal/src/host/tdx/pal_misc.c
+index 88cf0fd2..cae40d78 100644
+--- a/pal/src/host/tdx/pal_misc.c
++++ b/pal/src/host/tdx/pal_misc.c
+@@ -164,7 +164,7 @@ int _PalAttestationQuote(const void* user_report_data, size_t user_report_data_s
+ 
+     long tdx_ret;
+     do {
+-        tdx_ret = tdx_vmcall_getquote((uint64_t)g_shared_mem_for_quote,
++        tdx_ret = tdx_vmcall_getquote((uint64_t)g_shared_mem_for_quote | tdx_get_shared_bit(),
+                                        g_shared_mem_size_for_quote);
+     } while (tdx_ret == TDG_VP_VMCALL_STATUS_RETRY);
+ 

@@ -1,28 +1,11 @@
 #!/usr/bin/env bash
 # Gramine-SGX readiness check: CPU -> BIOS -> kernel -> userspace -> real enclave run -> DCAP quote.
 # Usage: ./check.sh [--no-run]   (--no-run skips building/launching the test enclave)
-# Exit code = number of FAILs. Report is saved to results/<host>-<utc>.txt
+# Exit code = number of FAILs. Report is saved to results/<host>-sgx-<utc>.txt
 set -u
-cd "$(dirname "$0")"
-mkdir -p results build
-OUT="results/$(hostname)-$(date -u +%Y%m%dT%H%M%SZ).txt"
-exec > >(tee "$OUT") 2>&1
-
-FAILS=0
-pass() { printf 'PASS  %-22s %s\n' "$1" "${2:-}"; }
-fail() { printf 'FAIL  %-22s %s\n' "$1" "${2:-}"; FAILS=$((FAILS + 1)); }
-warn() { printf 'WARN  %-22s %s\n' "$1" "${2:-}"; }
-info() { printf 'INFO  %-22s %s\n' "$1" "${2:-}"; }
-has() { command -v "$1" >/dev/null 2>&1; }
-flag() { grep -m1 '^flags' /proc/cpuinfo | grep -qw "$1"; }
-
-echo "== environment"
-. /etc/os-release 2>/dev/null
-info host "$(hostname)"
-info os "${PRETTY_NAME:-unknown}"
-info kernel "$(uname -r)"
-info cpu "$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
-v=$(systemd-detect-virt 2>/dev/null); info virt "${v:-unknown}"
+. "$(dirname "$0")/lib.sh"
+report sgx
+env_info
 [ -n "${KUBERNETES_SERVICE_HOST:-}" ] && info container kubernetes-pod
 { [ -f /.dockerenv ] || [ -f /run/.containerenv ]; } && info container docker/podman
 gce=$(curl -fs -m 2 -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/machine-type 2>/dev/null)
@@ -82,7 +65,14 @@ if [ -e /dev/sgx_enclave ]; then
 else
     fail dev.sgx_enclave "missing: kernel has no EPC (see epc/dmesg); in a pod: needs sgx.intel.com/enclave"
 fi
-[ -e /dev/sgx_provision ] && pass dev.sgx_provision || warn dev.sgx_provision "missing: DCAP attestation will fail"
+if [ -e /dev/sgx_provision ]; then
+    g=$(stat -c %G /dev/sgx_provision)
+    pass dev.sgx_provision "$(stat -c '%A %U:%G' /dev/sgx_provision)"
+    id -nG aesmd 2>/dev/null | grep -qw "$g" && [ "$g" != root ] \
+        || fail dev.sgx_provision.aesmd "aesmd not in group $g: QE3 won't load (0x4004); udevadm trigger --subsystem-match=misc, restart aesmd"
+else
+    warn dev.sgx_provision "missing: DCAP attestation will fail"
+fi
 tot=$(cat /sys/devices/system/node/node*/x86/sgx_total_bytes 2>/dev/null | awk '{s+=$1} END {print s+0}')
 [ "$tot" -gt 0 ] && info kernel.epc "$((tot / 1048576)) MiB managed by kernel"
 dmesg 2>/dev/null | grep -i sgx | head -5 | while read -r l; do info dmesg "$l"; done
@@ -90,6 +80,7 @@ dmesg 2>/dev/null | grep -i sgx | head -5 | while read -r l; do info dmesg "$l";
 echo "== userspace"
 if [ -S /var/run/aesmd/aesm.socket ]; then pass aesmd "socket present"; else warn aesmd "no /var/run/aesmd/aesm.socket: quotes need aesmd"; fi
 ldconfig -p 2>/dev/null | grep -q libdcap_quoteprov && pass dcap.qpl libdcap_quoteprov || warn dcap.qpl "libsgx-dcap-default-qpl missing"
+for v in /sys/firmware/efi/efivars/SgxRegistration{ServerRequest,Status}-*; do [ -e "$v" ] && info uefi "${v##*/}"; done
 [ -f /etc/sgx_default_qcnl.conf ] && info dcap.pccs "$(grep -m1 -o '"pccs_url"[^,]*' /etc/sgx_default_qcnl.conf)"
 if has gramine-sgx; then
     pass gramine "$(gramine-manifest --version 2>/dev/null || echo installed)"
@@ -109,14 +100,18 @@ if [ "${1:-}" != --no-run ] && has gramine-sgx && has make && has cc; then
         r=$(cd app && timeout 120 gramine-sgx hello 2>&1); rc=$?
         printf '%s\n' "$r" | sed 's/^/      | /'
         grep -q '^hello from enclave' <<<"$r" && pass run.gramine-sgx "enclave launched" || fail run.gramine-sgx "rc=$rc"
-        grep -q '^quote_bytes=' <<<"$r" && pass attest.dcap-quote "$(grep -o 'quote_bytes=.*' <<<"$r")" \
-            || fail attest.dcap-quote "check aesmd, dcap qpl, PCCS reachability, platform registration"
+        if grep -q '^quote_bytes=' <<<"$r"; then
+            pass attest.dcap-quote "$(grep -o 'quote_bytes=.*' <<<"$r")"
+        else
+            fail attest.dcap-quote "check aesmd, dcap qpl, PCCS reachability, platform registration"
+            j=$(journalctl -u aesmd --since "-3min" -o cat 2>/dev/null)
+            grep -iE 'error|fail|No certificate' <<<"$j" | tail -5 | while read -r l; do info aesmd.log "$l"; done
+            grep -q 'No certificate data' <<<"$j" \
+                && info attest.hint "PCS has no PCK cert: platform not registered with Intel (README req. 15)"
+        fi
     else
         fail build "see build/make.log"; tail -5 build/make.log
     fi
 fi
 
-echo "== summary"
-[ $FAILS -eq 0 ] && echo "RESULT: READY for Gramine-SGX" || echo "RESULT: NOT READY ($FAILS failures)"
-echo "report: $OUT"
-exit $FAILS
+summary Gramine-SGX

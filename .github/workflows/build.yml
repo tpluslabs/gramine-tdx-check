@@ -17,8 +17,8 @@ jobs:
 
       - name: Lint scripts
         run: |
-          bash -n check.sh install.sh
-          shellcheck -S error check.sh install.sh run.sh
+          bash -n check.sh check-tdx.sh install.sh install-tdx.sh lib.sh
+          shellcheck -S error -x check.sh check-tdx.sh install.sh install-tdx.sh run.sh lib.sh
 
       - name: Build static probe
         run: |

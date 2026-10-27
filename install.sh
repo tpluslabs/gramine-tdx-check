@@ -25,10 +25,16 @@ $SUDO apt-get install -y gramine sgx-aesm-service libsgx-aesm-quote-ex-plugin \
 $SUDO apt-get install -y libsgx-aesm-launch-plugin || echo "libsgx-aesm-launch-plugin not available: skipped (optional)"
 
 for g in sgx sgx_prv; do getent group $g >/dev/null && $SUDO usermod -aG $g "$(id -un)"; done
+# sgx_prv is created by the packages above, after /dev/sgx_provision exists: re-apply udev, else aesmd can't load QE3.
+$SUDO udevadm trigger --subsystem-match=misc 2>/dev/null && $SUDO udevadm settle 2>/dev/null || true
+# No local PCCS by default: talk to Intel PCS directly. Override with PCCS_URL=...
+PCCS_URL=${PCCS_URL:-https://api.trustedservices.intel.com/sgx/certification/v4/}
+$SUDO sed -i "s#\"pccs_url\": \"https://localhost:8081/sgx/certification/v4/\"#\"pccs_url\": \"$PCCS_URL\"#" /etc/sgx_default_qcnl.conf
+pidof systemd >/dev/null && $SUDO systemctl restart aesmd 2>/dev/null || true
 
 # Containers usually have no systemd: start aesmd by hand.
 if ! pidof aesm_service >/dev/null; then
     $SUDO mkdir -p /var/run/aesmd
     $SUDO env LD_LIBRARY_PATH=/opt/intel/sgx-aesm-service/aesm /opt/intel/sgx-aesm-service/aesm/aesm_service || true
 fi
-echo "done. Set pccs_url in /etc/sgx_default_qcnl.conf, re-login for group changes, then ./check.sh"
+echo "done. pccs_url in /etc/sgx_default_qcnl.conf: $PCCS_URL. Re-login for group changes, then ./check.sh"
