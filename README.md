@@ -140,13 +140,48 @@ Source: Intel ARK and Hetzner product pages, checked 2026-10-06. DX154 tested 20
 
 | Plan | CPU | Max EPC per CPU | Notes |
 |---|---|---|---|
-| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | **tested, Gramine-SGX READY** after manual platform registration: SGX2, 2 GB EPC as delivered (`PrmrrSize=2G`, iDRAC), DCAP quote OK. TDX on in BIOS; Gramine-TDX runs apps, TD quote still fails (see results) |
+| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | **tested**: Gramine-SGX READY, Gramine-TDX runs apps but no TD quote yet. See [DX154](#dx154-dell-poweredge-r470) |
 | EX131 | Xeon 6731P (Granite Rapids) | 128 GB | CPU capable; Hetzner says nothing about SGX in BIOS |
 | DX294 | 2× Xeon 6787P (Granite Rapids) | 512 GB | dual socket, so needs multi-package registration (requirement 15) |
 
-Hetzner has no SGX toggle. Before ordering, ask support whether SGX is enabled in BIOS (or for KVM/BIOS access) and
-whether all memory channels are populated symmetrically. A box can report SGX on and still have zero EPC: the OVH
-Scale-i1 (Xeon 6517P) does. So run `check.sh` on one box first.
+Hetzner has no SGX toggle in its panel. The Dell DX boxes come with iDRAC, so BIOS settings can be read (and set) there;
+for the others ask support whether SGX is enabled in BIOS (or for KVM/BIOS access) and whether all memory channels are
+populated symmetrically. A box can report SGX on and still have zero EPC: the OVH Scale-i1 (Xeon 6517P) does. So run
+`check.sh` on one box first.
+
+### DX154 (Dell PowerEdge R470)
+
+Tested 2026-10-27 on Ubuntu 26.04.1, kernel 7.0.0-38, single socket. Log: `results/hetzner-DX154-Xeon-6741P-26.04.md`.
+
+| | Status |
+|---|---|
+| Gramine-SGX | ✅ READY: production enclave (`sgx.debug=false`, EDMM) runs, DCAP quote 4730 bytes |
+| TDX host: BIOS, TDX module, `kvm_intel.tdx`, QEMU 10.2.1 `tdx-guest`, QGS on vsock 4050 | ✅ |
+| Gramine-TDX: app runs in a TD | ✅ with both `tdx/*.patch` |
+| Gramine-TDX: TD quote | ❌ QGS fetches the PCK cert, then `tee_att_get_quote` returns `0x11002` (`TEE_ATT_ERROR_INVALID_PARAMETER`). The TDREPORT itself checks out (type `0x81`, TEE_TCB_INFO and TDINFO hashes match). Open: plain (non-Gramine) TD quote as baseline |
+
+BIOS as delivered (read via iDRAC Redfish `/redfish/v1/Systems/System.Embedded.1/Bios`), BIOS 1.9.16, microcode `0xA000151`:
+
+| Attribute | Value | Note |
+|---|---|---|
+| `IntelSgx` | `On` | |
+| `PrmrrSize` | `2G` | the EPC; CPU allows up to 128 GB, raise it for bigger enclaves |
+| `SgxLeWr` | `Enabled` | FLC unlocked |
+| `SgxAutoRegistrationAgent` | `Disabled` | so the box isn't registered with Intel out of the box |
+| `SgxPackageInfoInBandAccess` | `Off` | |
+| `EnableTdx` / `EnableTdxSeamldr` | `Enabled` / `Enabled` | |
+| `MemoryEncryption` / `KeySplit` | `MultipleKeys` / `1` | TDX private KeyIDs 32–63 |
+| `SubNumaCluster` / `NodeInterleave` | `Disabled` / `Disabled` | |
+
+What it took to get there:
+1. `install.sh`. On a fresh install `/dev/sgx_provision` stays `root:root 0600` (the `sgx_prv` group appears after the
+   node), so aesmd can't load QE3 (`0x4004`, gramine `AESM error 38`). `install.sh` now re-applies udev and restarts aesmd.
+2. Platform registration (requirement 15), even with one socket. Without it PCS returns 404 for the PCK cert
+   (`0xe011`, gramine `AESM error 44`). Done by hand: platform manifest (field 6 of `PCKIDRetrievalTool`'s CSV) POSTed to
+   `https://api.trustedservices.intel.com/sgx/registration/v1/platform`, `201` with the PPID; PCS served the cert at once.
+   `PCKIDRetrievalTool` sets the `SgxRegistrationStatus` UEFI var to completed, so MPA would skip this box afterwards.
+3. TDX: the host was already set up (`kvm_intel.tdx=1` in grub). `install-tdx.sh` builds gramine-tdx, and sets
+   `port = 4050` in `/etc/qgs.conf` (tdx-qgs 1.27 defaults to a unix socket only, gramine-tdx's QEMU expects vsock).
 
 
 ---
