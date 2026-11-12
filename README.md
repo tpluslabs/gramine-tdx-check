@@ -27,6 +27,7 @@ Kubernetes: `kubectl apply -f k8s/pod.yaml` (see the comments in the file).
 | `lib.sh` | report + PASS/FAIL helpers shared by both runners |
 | `install-tdx.sh` | builds Gramine-TDX: upstream `gramine-tdx@intel_tdx` `8dc53f9a` + `tdx/*.patch`, td-shim `33fa83e` (PR #846, QEMU 9+ TempMem layout), Rust 1.88.0; guards glibc 2.39's `OPEN_TREE_CLONE` against Linux ≥ 6.x headers |
 | `tdx/gramine-tdx-getquote-shared-bit.patch` | sets the TDX shared bit on the `GetQuote` TDVMCALL buffer GPA: KVM rejects a private GPA, so `/dev/attestation/quote` failed with EACCES before reaching QGS |
+| `tdx/gramine-tdx-getquote-raw-tdreport.patch` | passes the bare TDREPORT in the `GetQuote` buffer and reads the bare quote back. Gramine-TDX wrapped the report in a QGS message (4-byte length + `qgs_msg_get_quote_req_t`); QEMU 10.2.1 wraps it again, so QGS got a 1052-byte "report" and `tee_att_get_quote` returned `0x11002` |
 | `tdx/gramine-tdx-mmio-shared-bit.patch` | sets the TDX shared bit on MMIO `#VE` requests (without it virtio init fails under QEMU 10) and drops a conflicting `<string.h>` include |
 | `probe/sgx-cpuid.c` | reads raw CPUID leaf 7/0x12 and `IA32_FEATURE_CONTROL`, so it can tell "CPU lacks SGX" apart from "BIOS disabled it". Built on the fly if `cc` exists, else downloaded prebuilt from the `latest` release |
 | `.github/workflows/build.yml` | CI: lints the scripts and builds the probe as a static binary on every push/PR. Pushes to `main` update the rolling [`latest`](https://github.com/tpluslabs/gramine-cheker/releases/tag/latest) prerelease; `v*` tags get a versioned release. The binary ships with a `.sha256` |
@@ -140,7 +141,7 @@ Source: Intel ARK and Hetzner product pages, checked 2026-10-06. DX154 tested 20
 
 | Plan | CPU | Max EPC per CPU | Notes |
 |---|---|---|---|
-| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | **tested**: Gramine-SGX READY, Gramine-TDX runs apps but no TD quote yet. See [DX154](#dx154-dell-poweredge-r470) |
+| DX154 | Xeon 6741P (Granite Rapids) | 128 GB | **tested**: Gramine-SGX READY, Gramine-TDX READY (app in a TD + TD quote). See [DX154](#dx154-dell-poweredge-r470) |
 | EX131 | Xeon 6731P (Granite Rapids) | 128 GB | CPU capable; Hetzner says nothing about SGX in BIOS |
 | DX294 | 2× Xeon 6787P (Granite Rapids) | 512 GB | dual socket, so needs multi-package registration (requirement 15) |
 
@@ -151,14 +152,14 @@ populated symmetrically. A box can report SGX on and still have zero EPC: the OV
 
 ### DX154 (Dell PowerEdge R470)
 
-Tested 2026-10-27 on Ubuntu 26.04.1, kernel 7.0.0-38, single socket. Log: `results/hetzner-DX154-Xeon-6741P-26.04.md`.
+Tested 2026-10-27 on Ubuntu 26.04.1, kernel 7.0.0-38, single socket; TD quote retested 2026-11-12 on kernel 7.0.0-42. Log: `results/hetzner-DX154-Xeon-6741P-26.04.md`.
 
 | | Status |
 |---|---|
 | Gramine-SGX | ✅ READY: production enclave (`sgx.debug=false`, EDMM) runs, DCAP quote 4730 bytes |
 | TDX host: BIOS, TDX module, `kvm_intel.tdx`, QEMU 10.2.1 `tdx-guest`, QGS on vsock 4050 | ✅ |
-| Gramine-TDX: app runs in a TD | ✅ with both `tdx/*.patch` |
-| Gramine-TDX: TD quote | ❌ QGS fetches the PCK cert, then `tee_att_get_quote` returns `0x11002` (`TEE_ATT_ERROR_INVALID_PARAMETER`). The TDREPORT itself checks out (type `0x81`, TEE_TCB_INFO and TDINFO hashes match). Open: plain (non-Gramine) TD quote as baseline |
+| Gramine-TDX: app runs in a TD | ✅ with the `tdx/*.patch` set |
+| Gramine-TDX: TD quote | ✅ 5243 bytes, with `tdx/gramine-tdx-getquote-raw-tdreport.patch`. Before it `tee_att_get_quote` returned `0x11002`: the request was QGS-wrapped twice (once by Gramine, once by QEMU) |
 
 BIOS as delivered (read via iDRAC Redfish `/redfish/v1/Systems/System.Embedded.1/Bios`), BIOS 1.9.16, microcode `0xA000151`:
 

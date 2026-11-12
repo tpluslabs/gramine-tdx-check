@@ -1,0 +1,136 @@
+--- a/pal/src/host/tdx/pal_misc.c
++++ b/pal/src/host/tdx/pal_misc.c
+@@ -104,8 +104,6 @@
+ int _PalAttestationQuote(const void* user_report_data, size_t user_report_data_size, void* quote,
+                          size_t* quote_size) {
+     int ret;
+-    qgs_msg_get_quote_req_t* quote_req   = NULL;
+-    qgs_msg_get_quote_resp_t* quote_resp = NULL;
+ 
+     if (!quote_size || user_report_data_size != 64)
+         return -PAL_ERROR_INVAL;
+@@ -137,30 +135,10 @@
+     struct tdx_get_quote_format* tdx_quote = (struct tdx_get_quote_format*)g_shared_mem_for_quote;
+     vm_shared_writeq(&tdx_quote->version, 1); /* must be 1 for current TDX */
+ 
+-    size_t quote_req_size = sizeof(qgs_msg_get_quote_req_t) + sizeof(stack_report);
+-    quote_req = malloc(quote_req_size);
+-    if (!quote_req) {
+-        ret = -PAL_ERROR_NOMEM;
+-        goto out;
+-    }
+-
+-    quote_req->header.type = GET_QUOTE_REQ;
+-    quote_req->header.major_version = QGS_MSG_LIB_MAJOR_VER;
+-    quote_req->header.minor_version = QGS_MSG_LIB_MINOR_VER;
+-    quote_req->header.size = quote_req_size;
+-    quote_req->header.error_code = 0;
+-    quote_req->report_size = sizeof(stack_report);
+-    quote_req->id_list_size = 0;
+-    memcpy(quote_req->report_id_list, &stack_report, sizeof(stack_report));
+-
+-    size_t input_size = TDX_GET_QUOTE_DATA_HEADER_SIZE + quote_req_size;
+-    vm_shared_writel(&tdx_quote->input_size, input_size);
+-
+-    /* input data has the format `4B size + qgs_msg_get_quote_req_t object` */
+-    uint32_t input_size_be = __builtin_bswap32((uint32_t)quote_req_size);
+-    vm_shared_memcpy((char*)&tdx_quote->data, &input_size_be, TDX_GET_QUOTE_DATA_HEADER_SIZE);
+-    vm_shared_memcpy((char*)&tdx_quote->data + TDX_GET_QUOTE_DATA_HEADER_SIZE, quote_req,
+-                     quote_req_size);
++    /* upstream QEMU (seen on 10.2.1) wraps the input in the QGS message itself and unwraps the reply,
++     * the contract Linux tdx-guest uses: input is the bare TDREPORT, output is the bare quote */
++    vm_shared_writel(&tdx_quote->input_size, sizeof(stack_report));
++    vm_shared_memcpy((char*)&tdx_quote->data, &stack_report, sizeof(stack_report));
+ 
+     long tdx_ret;
+     do {
+@@ -193,82 +171,26 @@
+         goto out;
+     }
+ 
+-    /* output data has the format `4B size + qgs_msg_get_quote_resp_t object` */
+-    size_t quote_resp_size = __builtin_bswap32(vm_shared_readl((uint32_t*)&tdx_quote->data));
+-    if (quote_resp_size > g_shared_mem_size_for_quote - offsetof(struct tdx_get_quote_format, data)
+-            - TDX_GET_QUOTE_DATA_HEADER_SIZE) {
+-        /* maliciously large size */
+-        ret = -PAL_ERROR_DENIED;
+-        goto out;
+-    }
+-    if (quote_resp_size < sizeof(qgs_msg_get_quote_resp_t)) {
+-        /* maliciously small size */
+-        ret = -PAL_ERROR_DENIED;
+-        goto out;
+-    }
+-
+-    quote_resp = malloc(quote_resp_size);
+-    if (!quote_resp) {
+-        ret = -PAL_ERROR_NOMEM;
+-        goto out;
+-    }
+-
+-    vm_shared_memcpy(quote_resp, (char*)&tdx_quote->data + TDX_GET_QUOTE_DATA_HEADER_SIZE,
+-                     quote_resp_size);
+-
+-    if (quote_resp->header.major_version != QGS_MSG_LIB_MAJOR_VER ||
+-            quote_resp->header.type != GET_QUOTE_RESP ||
+-            quote_resp->header.size != quote_resp_size) {
+-        ret = -PAL_ERROR_DENIED;
+-        goto out;
+-    }
+-
+-    if (quote_resp->header.error_code != QGS_MSG_SUCCESS) {
+-        log_warning("TDX Quote Generation Service (QGS) returned error %d",
+-                    quote_resp->header.error_code);
+-        switch (quote_resp->header.error_code) {
+-            case QGS_MSG_ERROR_OUT_OF_MEMORY:
+-                ret = -PAL_ERROR_NOMEM;
+-                goto out;
+-            case QGS_MSG_ERROR_INVALID_PARAMETER:
+-            case QGS_MSG_ERROR_INVALID_VERSION:
+-            case QGS_MSG_ERROR_INVALID_TYPE:
+-            case QGS_MSG_ERROR_INVALID_SIZE:
+-            case QGS_MSG_ERROR_INVALID_CODE:
+-                ret = -PAL_ERROR_INVAL;
+-                goto out;
+-            default:
+-                ret = -PAL_ERROR_DENIED;
+-                goto out;
+-        }
+-    }
+-
+-    size_t max_id_quote_size = quote_resp_size - sizeof(qgs_msg_get_quote_resp_t);
+-    if (quote_resp->selected_id_size > max_id_quote_size ||
+-            quote_resp->quote_size > max_id_quote_size ||
+-            (quote_resp->selected_id_size + quote_resp->quote_size) > max_id_quote_size) {
++    if (output_size < 48 + 584) {
++        /* shorter than a quote header + TD report body */
+         ret = -PAL_ERROR_DENIED;
+         goto out;
+     }
+ 
+-    if (*quote_size < quote_resp->quote_size) {
+-        *quote_size = quote_resp->quote_size;
++    if (*quote_size < output_size) {
++        *quote_size = output_size;
+         ret = -PAL_ERROR_NOMEM;
+         goto out;
+     }
+ 
+     if (quote) {
+-        /* quote may be NULL if caller only wants to know the size of the quote;
+-         * note that we ignore ID (if any) */
+-        memcpy(quote, (char*)&quote_resp->id_quote + quote_resp->selected_id_size,
+-               quote_resp->quote_size);
++        /* quote may be NULL if caller only wants to know the size of the quote */
++        vm_shared_memcpy(quote, (char*)&tdx_quote->data, output_size);
+     }
+ 
+-    *quote_size = quote_resp->quote_size;
++    *quote_size = output_size;
+     ret = 0;
+ out:
+-    free(quote_req);
+-    free(quote_resp);
+     spinlock_unlock(&g_quote_lock);
+     return ret;
+ }
