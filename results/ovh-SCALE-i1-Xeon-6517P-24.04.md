@@ -49,3 +49,21 @@ FAIL  attest.dcap-quote      check aesmd, dcap qpl, PCCS reachability, platform 
 RESULT: NOT READY (5 failures)
 report: results/ovh-bm-1-20260930T131649Z.txt
 ```
+
+# try2 - TDX host, 2026-11-04 (BIOS untouched since 26.04 try3)
+## changes
+- `linux-generic-hwe-24.04` → kernel 7.0.0-42, `GRUB_CMDLINE_LINUX_DEFAULT="kvm_intel.tdx=1 nohibernate"`
+  (without `nohibernate`: `virt/tdx: initialization failed: Hibernation support is enabled`)
+
+## result
+TDX and SGX both dead in firmware: the BIOS reserves PRMRR and SEAMRR but neither range is valid, so MCHECK rejected the config.
+- `virt/tdx: BIOS enabled: private KeyID range [32, 64)` (MSR `0x87` = `0x200000001F`: 31 MKTME + 32 TDX KeyIDs)
+- `modprobe kvm_intel tdx=1` → `Operation not supported` (no `/dev/kvm` at all with `kvm_intel.tdx=1`; `tdx=0` loads). No `module initialized`.
+- SEAMRR `0x1400` = `0xFFE000008`, mask `0x1401` = `0xFFFFFFE000400`: locked, valid bit 11 clear → no TDX module loaded
+- PRMRR mask `0x1f5` = `0xFFFF000000400`: locked, valid bit 11 clear; CPUID `0x12.0` SGX1 = false → zero EPC
+- e820 reserves `0xffe000000-0x1fffffffff` (32 MB SEAMRR + 64 GB PRMRR): OS sees 62 of 128 GB (8×16 GB, A1–H1, 1DPC)
+- SRAT has 10 NUMA nodes, 9 memoryless (SNC on); microcode `0x01000434`, BIOS `1.06.OV04`
+
+Next (needs BIOS access, OVH KVM/IPMI): match the working DX154: SNC Disabled, PRMRR 2G, TDX + SEAM Loader Enabled,
+TME-MT on, key split 1, memory integrity off; then check `0x1401`/`0x1f5` bit 11. If still clear, it is an OVH BIOS issue: ticket.
+Even with TDX up, TD quotes need SGX (the TD quoting enclave runs in EPC), so a zero EPC also blocks attestation.

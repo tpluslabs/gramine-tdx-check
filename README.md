@@ -147,7 +147,7 @@ Source: Intel ARK and Hetzner product pages, checked 2026-10-06. DX154 tested 20
 
 Hetzner has no SGX toggle in its panel. The Dell DX boxes come with iDRAC, so BIOS settings can be read (and set) there;
 for the others ask support whether SGX is enabled in BIOS (or for KVM/BIOS access) and whether all memory channels are
-populated symmetrically. A box can report SGX on and still have zero EPC: the OVH Scale-i1 (Xeon 6517P) does. So run
+populated symmetrically. A box can report SGX on and still have zero EPC: the OVH Scale-i1 (Xeon 6517P) does, and its TDX module never loads either (PRMRR and SEAMRR reserved but not valid, `results/ovh-SCALE-i1-Xeon-6517P-24.04.md` try2). So run
 `check.sh` on one box first.
 
 ### DX154 (Dell PowerEdge R470)
