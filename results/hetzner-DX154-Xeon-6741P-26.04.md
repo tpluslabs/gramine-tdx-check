@@ -40,6 +40,23 @@ All host checks PASS. Only FAIL: no `gramine-tdx` under `/opt/gramine-tdx` (`ins
   TEE_TCB_INFO and TDINFO SHA-384 match the hashes in REPORTMACSTRUCT, report data ours. Cause still open: next step is a
   plain (non-Gramine) TD quote as baseline.
 
+# try4 - TD quote from Gramine-TDX (2026-11-12, kernel 7.0.0-42, QEMU 10.2.1, tdx-qgs 1.27.101.1)
+## baseline
+A plain Linux TD on the same host (`os-builds/aws/hybrid1` image in `infra`, configfs-tsm) gets a 5243-byte quote from the
+same QGS, so host, PCCS and platform registration are fine. Linux puts the bare 1024-byte TDREPORT in the `GetQuote` buffer.
+
+## cause
+Gramine-TDX put `4-byte length + qgs_msg_get_quote_req_t + TDREPORT` there (1052 bytes). QEMU builds the QGS message
+itself, so QGS received a wrapped message as the report: `tee_att_get_quote return 0x11002`, QEMU `QGS message error code 73729`.
+That QEMU does the wrapping is inferred from the behaviour, not read from its source.
+
+## changes
+- New `tdx/gramine-tdx-getquote-raw-tdreport.patch`: bare TDREPORT in, bare quote out.
+- Rebuilt and reinstalled gramine-tdx in `/opt/gramine-tdx` (`ninja -C build install` needs `$P/rust/bin` on `PATH` for the `td-shim-ld` step).
+
+## result
+**Gramine-TDX: READY.** `check-tdx.sh`: `PASS attest.tdx-quote quote_bytes=5243`. The quote's signature was not verified.
+
 ## BIOS (iDRAC Redfish, read-only), BIOS 1.9.16, microcode 0xA000151
 `IntelSgx=On`, `PrmrrSize=2G`, `EnableTdx=Enabled`, `EnableTdxSeamldr=Enabled`, `KeySplit=1`, `MemoryEncryption=MultipleKeys`,
 `SgxAutoRegistrationAgent=Disabled`, `SgxPackageInfoInBandAccess=Off`, `SgxLeWr=Enabled`, `SubNumaCluster=Disabled`, `NodeInterleave=Disabled`.
